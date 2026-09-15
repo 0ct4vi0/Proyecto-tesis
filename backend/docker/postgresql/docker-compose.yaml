@@ -1,0 +1,24 @@
+services:
+  postgres:
+    image: postgres:17
+    container_name: vulnerability-postgres
+    restart: unless-stopped
+
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres_dev_password
+      POSTGRES_DB: vulnerability_scanner
+
+    ports:
+      - "5432:5432"
+
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+volumes:
+  postgres_data:
+
+networks:
+  default:
+    name: vulnman-net
+    external: true

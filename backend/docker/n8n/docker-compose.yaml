@@ -1,0 +1,27 @@
+services:
+  n8n:
+    image: n8nio/n8n:2.32.3
+    container_name: vulnerability-n8n
+    restart: unless-stopped
+
+    ports:
+      - "5678:5678"
+
+    environment:
+      - N8N_HOST=localhost
+      - N8N_PORT=5678
+      - N8N_PROTOCOL=http
+      - NODE_ENV=production
+      - GENERIC_TIMEZONE=UTC
+      - TZ=UTC
+
+    volumes:
+      - n8n_data:/home/node/.n8n
+
+volumes:
+  n8n_data:
+
+networks:
+  default:
+    name: vulnman-net
+    external: true

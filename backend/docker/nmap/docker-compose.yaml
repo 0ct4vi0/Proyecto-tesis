@@ -1,0 +1,17 @@
+services:
+  nmap-api:
+    build:
+      context: ../../
+      dockerfile: docker/nmap/Dockerfile
+    container_name: vulnerability-nmap
+    restart: unless-stopped
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    ports:
+      - "8000:8000"
+
+networks:
+  default:
+    name: vulnman-net
+    external: true
