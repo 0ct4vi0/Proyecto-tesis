@@ -21,7 +21,7 @@
         el componente 60 veces por segundo; se manipula el DOM
         directamente a través de refs, igual que hacía el script.ts original)
      2. Menú lateral escurridizo     -> useState booleano simple
-     3. Botón "Iniciar escaneo"      -> useState + useRef (para el id del timeout)
+     3. Botón "Iniciar escaneo"      -> useState + input de IP ingresada por el usuario
 ============================================================ */
 
 import { useEffect, useRef, useState } from 'react';
@@ -33,6 +33,15 @@ const HEADER_MAX_OFFSET_X = 14; // px máximos de desplazamiento horizontal del 
 const HEADER_MAX_OFFSET_Y = 8;  // px máximos de desplazamiento vertical del header
 const PUPIL_MAX_OFFSET = 4;     // px máximos que se mueve la pupila del logo
 const LERP_FACTOR = 0.08;       // qué tan "pegado" sigue el header al mouse (0 a 1)
+
+// CAMBIO: validación de IPv4. Cada octeto debe estar entre 0 y 255
+// (la regex descarta cosas como 999.1.1.1 o 1.2.3 que un \d{1,3} simple dejaría pasar)
+const IPV4_REGEX =
+  /^((25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)$/;
+
+// CAMBIO: URL base del backend y cada cuánto se consulta si el escaneo terminó
+const API_URL = 'http://127.0.0.1:8000';
+const POLL_INTERVAL_MS = 5000;
 
 function App() {
   /* ----------------------------------------------------------
@@ -107,52 +116,94 @@ function App() {
   /* ----------------------------------------------------------
      BLOQUE 3: BOTÓN "INICIAR ESCANEO"
      isScanning controla tanto el texto/estado visual como el
-     bloqueo de clics repetidos. scanTimeoutRef guarda el id del
-     setTimeout para poder cancelarlo si el componente se
-     desmonta a mitad de un escaneo (evita actualizar estado de
-     un componente que ya no existe).
+     bloqueo de clics repetidos.
+
+     CAMBIO: ahora la IP la ingresa el usuario en un input.
+     - targetIp guarda lo que se escribe en el campo.
+     - isIpValid se calcula en cada render (no necesita state propio,
+       se deriva de targetIp).
+     - El botón queda deshabilitado hasta que la IP sea válida.
   ---------------------------------------------------------- */
   const [isScanning, setIsScanning] = useState(false);
   const [scanStatus, setScanStatus] = useState('');
-  // CAMBIO: se eliminó scanTimeoutRef — ya no hay setTimeout que cancelar,
-  // ahora el ciclo de vida de la petición lo maneja el fetch (then/catch)
+  const [targetIp, setTargetIp] = useState('');
+  // CAMBIO: id del escaneo en curso. Mientras tenga valor, se hace polling al backend.
+  const [activeScanId, setActiveScanId] = useState<string | null>(null);
+
+  const trimmedIp = targetIp.trim();
+  const isIpValid = IPV4_REGEX.test(trimmedIp);
+  // el mensaje de error solo aparece si el usuario ya escribió algo inválido
+  // (no queremos mostrarlo con el campo vacío)
+  const showIpError = trimmedIp.length > 0 && !isIpValid;
 
   function handleScanClick() {
-    if (isScanning) return; // evita disparar varios escaneos superpuestos
+    // evita disparar varios escaneos superpuestos y escaneos con IP inválida
+    if (isScanning || !isIpValid) return;
 
     setIsScanning(true);
     setScanStatus('Escaneando objetivo…');
 
-    // CAMBIO: se reemplaza el setTimeout simulado por un fetch real
-    // al backend de FastAPI (POST /scans/start). La UI se mantiene igual
-    // (isScanning / scanStatus), solo cambia de dónde viene el resultado.
-    fetch('http://127.0.0.1:8000/scans/start', {
+    // CAMBIO: la IP que se manda ahora es la que escribió el usuario
+    // (antes estaba fija en '172.24.0.1'). Se mantiene el campo "network"
+    // para no tener que tocar el contrato con el backend.
+    fetch(`${API_URL}/scans/start`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ network: '192.168.1.0/24' }), // TODO: reemplazar por un valor real/dinámico más adelante
+      body: JSON.stringify({ network: trimmedIp }),
     })
       .then((res) => {
         if (!res.ok) throw new Error(`Respuesta no OK: ${res.status}`);
         return res.json();
       })
       .then((data) => {
-        // CAMBIO: antes esto era fijo ("Escaneo finalizado..."), ahora
-        // refleja lo que efectivamente devolvió el backend
-        setIsScanning(false);
-        setScanStatus(`Backend confirmó: ${data.status} (${data.network})`);
+        // CAMBIO: el backend solo confirma que el escaneo ARRANCÓ (el escaneo real
+        // tarda bastante más). Por eso isScanning sigue en true y el radar sigue
+        // girando; el useEffect de abajo consulta el estado hasta que termine.
+        setActiveScanId(data.scan_id);
+        setScanStatus(`Escaneo en curso · orden: ${data.scan_id}`);
       })
       .catch((err) => {
-        // CAMBIO: nuevo — antes no existía manejo de error porque
-        // el setTimeout nunca podía fallar
         console.error('Error al conectar con el backend:', err);
         setIsScanning(false);
         setScanStatus('Error al conectar con el backend');
       });
   }
 
-// CAMBIO: se eliminó el useEffect de cleanup del setTimeout —
-// ya no aplica porque no hay timeout pendiente que cancelar al desmontar
+  // CAMBIO: polling del estado del escaneo. Se activa cuando hay un activeScanId
+  // y se limpia solo (clearInterval) al terminar, al desmontar o al cambiar de escaneo.
+  useEffect(() => {
+    if (!activeScanId) return;
 
+    function finishScan(message: string) {
+      setActiveScanId(null);
+      setIsScanning(false);
+      setScanStatus(message);
+    }
+
+    const intervalId = window.setInterval(async () => {
+      try {
+        const res = await fetch(`${API_URL}/scans/${activeScanId}`);
+        if (res.status === 404) {
+          finishScan('Se perdió el seguimiento del escaneo (el backend se reinició)');
+          return;
+        }
+        if (!res.ok) return; // error momentáneo: se reintenta en el próximo ciclo
+
+        const data = await res.json();
+        if (data.status === 'completed') {
+          finishScan('Escaneo finalizado. Revisá tu correo para ver el reporte.');
+        } else if (data.status === 'failed') {
+          finishScan('El escaneo no pudo completarse');
+        } else if (data.status === 'timeout') {
+          finishScan('El escaneo tardó demasiado y se dejó de seguir');
+        }
+      } catch {
+        // sin conexión con el backend por un momento: se reintenta en el próximo ciclo
+      }
+    }, POLL_INTERVAL_MS);
+
+    return () => window.clearInterval(intervalId);
+  }, [activeScanId]);
 
   return (
     <>
@@ -205,7 +256,7 @@ function App() {
         </div>
       </header>
 
-      {/* ================= HERO CENTRAL: botón "Iniciar escaneo" ================= */}
+      {/* ================= HERO CENTRAL: IP + botón "Iniciar escaneo" ================= */}
       <main className="relative z-[1] flex min-h-screen flex-col items-center justify-center gap-[34px] px-6 text-center">
         <div>
           <h1 className="mb-2.5 font-['Space_Grotesk'] text-[clamp(26px,4vw,40px)] font-semibold text-[var(--text)]">
@@ -216,10 +267,42 @@ function App() {
           </p>
         </div>
 
+        {/* CAMBIO: campo para ingresar la IP a escanear. Se deshabilita
+            mientras hay un escaneo en curso. Enter dispara el escaneo
+            (igual que hacer clic en el botón). */}
+        <div className="relative w-full max-w-[320px]">
+          <input
+            type="text"
+            inputMode="decimal"
+            autoComplete="off"
+            spellCheck={false}
+            value={targetIp}
+            onChange={(e) => setTargetIp(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') handleScanClick();
+            }}
+            disabled={isScanning}
+            placeholder="Ingresá la IP (ej: 192.168.1.10)"
+            aria-label="Dirección IP a escanear"
+            aria-invalid={showIpError}
+            className={`w-full rounded-full border bg-[var(--surface)] px-5 py-3 text-center font-['IBM_Plex_Mono'] text-[13px] text-[var(--text)] outline-none transition placeholder:text-[var(--muted)] focus:shadow-[0_0_16px_var(--accent-glow)] disabled:cursor-not-allowed disabled:opacity-50 ${
+              showIpError
+                ? 'border-red-500/70 focus:border-red-500'
+                : 'border-[var(--line)] focus:border-[var(--accent-dim)]'
+            }`}
+          />
+          {/* CAMBIO: el mensaje de error ahora es absolute, así no reserva espacio
+              debajo del input y el círculo queda más cerca. Cuando aparece, "flota"
+              en el hueco entre el input y el radar sin mover el layout. */}
+          <div className="absolute left-0 right-0 top-full mt-1.5 text-center text-[12px] text-red-400">
+            {showIpError && 'IPv4 no válida (ej: 192.168.1.10)'}
+          </div>
+        </div>
+
         {/* anillos concéntricos + botón. El barrido de radar (::before
             en la versión CSS) ahora es un div que solo se renderiza
             mientras isScanning es true */}
-        <div className="relative flex h-[220px] w-[220px] items-center justify-center">
+        <div className="relative -mt-2 flex h-[220px] w-[220px] items-center justify-center">
           <div className="absolute h-full w-full rounded-full border border-[var(--line)]" />
           <div className="absolute h-[72%] w-[72%] rounded-full border border-[var(--line)]" />
           <div className="absolute h-[44%] w-[44%] rounded-full border border-[var(--accent-dim)]" />
@@ -228,9 +311,12 @@ function App() {
             <div className="absolute inset-0 animate-[sweep_1.4s_linear_infinite] rounded-full bg-[conic-gradient(from_0deg,var(--accent-glow),transparent_30%)]" />
           )}
 
+          {/* CAMBIO: el botón queda deshabilitado hasta que haya una IP válida.
+              Los hover/active pasan a enabled: para que no se activen estando deshabilitado. */}
           <button
             onClick={handleScanClick}
-            className="relative z-[2] rounded-full border border-[var(--accent-dim)] bg-[var(--surface)] px-[30px] py-[15px] text-sm font-semibold tracking-wide text-[var(--accent)] transition hover:bg-[var(--accent)] hover:text-[#16110A] hover:shadow-[0_0_24px_var(--accent-glow)] active:scale-[0.97]"
+            disabled={!isIpValid || isScanning}
+            className="relative z-[2] rounded-full border border-[var(--accent-dim)] bg-[var(--surface)] px-[30px] py-[15px] text-sm font-semibold tracking-wide text-[var(--accent)] transition enabled:hover:bg-[var(--accent)] enabled:hover:text-[#16110A] enabled:hover:shadow-[0_0_24px_var(--accent-glow)] enabled:active:scale-[0.97] disabled:cursor-not-allowed disabled:opacity-40"
           >
             {isScanning ? 'Escaneando…' : 'Iniciar escaneo'}
           </button>

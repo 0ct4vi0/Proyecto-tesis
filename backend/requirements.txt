@@ -1,5 +1,6 @@
 fastapi==0.115.0
 uvicorn[standard]==0.30.6
-python-gvm==24.7.0
+python-gvm>=26.0.0
 pydantic==2.9.2
 sqlmodel
+httpx

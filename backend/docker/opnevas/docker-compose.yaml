@@ -221,8 +221,9 @@ services:
     env_file:
       - ../../.env
     ports:
-      - "8001:8000"
-
+      - "8002:8002"
+    volumes:
+      - gvmd_socket_vol:/run/gvmd
   openvasd:
     image: registry.community.greenbone.net/community/openvas-scanner:stable
     deploy:

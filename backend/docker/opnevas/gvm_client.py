@@ -12,6 +12,9 @@ hardcodeadas" detectado en la evaluación de la tesis.
 """
 
 import os
+import uuid
+from contextlib import contextmanager
+from datetime import datetime
 from typing import Optional
 
 from gvm.connections import TLSConnection, UnixSocketConnection
@@ -48,17 +51,25 @@ def _get_connection():
     return TLSConnection(hostname=GVM_HOST, port=GVM_PORT)
 
 
-def _open_session() -> Gmp:
+@contextmanager
+def _open_session():
     if not GVM_USERNAME or not GVM_PASSWORD:
         raise GvmClientError(
             "GVM_USERNAME / GVM_PASSWORD no configurados en el entorno"
         )
     connection = _get_connection()
     transform = EtreeCheckCommandTransform()
-    gmp = Gmp(connection, transform=transform)
-    gmp.connect()
-    gmp.authenticate(GVM_USERNAME, GVM_PASSWORD)
-    return gmp
+    # CAMBIO: los errores al conectar con gvmd (socket caído, "Connection
+    # refused", fallo de autenticación) se lanzaban como GvmError fuera de
+    # cualquier try y la API respondía 500 sin explicación. Ahora se
+    # convierten en GvmClientError, que main.py traduce a 502/503 con un
+    # mensaje claro.
+    try:
+        with Gmp(connection, transform=transform) as gmp:
+            gmp.authenticate(GVM_USERNAME, GVM_PASSWORD)
+            yield gmp
+    except GvmError as exc:
+        raise GvmClientError(f"Error de comunicación con GVM: {exc}") from exc
 
 
 def check_health() -> dict:
@@ -103,6 +114,19 @@ def _find_id_by_name(items: list[dict], name: str) -> Optional[str]:
         if item["name"] == name:
             return item["id"]
     return None
+
+
+def _unique_scan_suffix(base: str) -> str:
+    """
+    CAMBIO: GVM exige que el nombre de cada target sea único. Antes el nombre
+    era "target-<task_name o IP>", así que un segundo escaneo contra el mismo
+    objetivo fallaba con "Response Error 400. Target exists already" (y la
+    API respondía 500 a n8n). Ahora cada escaneo lleva timestamp + un id
+    corto aleatorio, lo que permite repetir escaneos sobre la misma IP y
+    deja cada corrida identificable en la interfaz de Greenbone.
+    """
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    return f"{base}-{stamp}-{uuid.uuid4().hex[:6]}"
 
 
 def create_and_start_scan(
@@ -154,24 +178,40 @@ def create_and_start_scan(
                     "Consultá /port-lists y pasá port_list_id explícito."
                 )
 
-        name_suffix = task_name or target_hosts
-        target_response = gmp.create_target(
-            name=f"target-{name_suffix}",
-            hosts=[target_hosts],
-            port_list_id=port_list_id,
-        )
-        target_id = target_response.get("id")
+        # CAMBIO: el mismo sufijo único se usa para target y task, así los
+        # dos quedan emparejados en la interfaz de Greenbone.
+        name_suffix = _unique_scan_suffix(task_name or target_hosts)
 
-        task_response = gmp.create_task(
-            name=f"scan-{name_suffix}",
-            config_id=scan_config_id,
-            target_id=target_id,
-            scanner_id=scanner_id,
-        )
-        task_id = task_response.get("id")
+        target_id = None
+        try:
+            target_response = gmp.create_target(
+                name=f"target-{name_suffix}",
+                hosts=[target_hosts],
+                port_list_id=port_list_id,
+            )
+            target_id = target_response.get("id")
 
-        start_response = gmp.start_task(task_id)
-        report_id = start_response.xpath("string(report_id)") or None
+            task_response = gmp.create_task(
+                name=f"scan-{name_suffix}",
+                config_id=scan_config_id,
+                target_id=target_id,
+                scanner_id=scanner_id,
+            )
+            task_id = task_response.get("id")
+
+            start_response = gmp.start_task(task_id)
+            report_id = start_response.xpath("string(report_id)") or None
+        except GvmError as exc:
+            # CAMBIO: cualquier error de GMP (incluido GvmResponseError) se
+            # convierte en GvmClientError para que main.py responda con un
+            # mensaje claro en lugar de un 500 genérico. Si el target ya se
+            # había creado, se elimina para no dejar huérfanos en Greenbone.
+            if target_id:
+                try:
+                    gmp.delete_target(target_id, ultimate=True)
+                except GvmError:
+                    pass
+            raise GvmClientError(f"Error de GVM al crear/iniciar el escaneo: {exc}") from exc
 
         return {
             "task_id": task_id,
@@ -182,33 +222,72 @@ def create_and_start_scan(
 
 
 def get_task_status(task_id: str) -> dict:
-    with _open_session() as gmp:
-        response = gmp.get_task(task_id)
-        task = response.find("task")
-        if task is None:
-            raise GvmClientError(f"Task {task_id} no encontrada")
-        status = task.findtext("status")
-        progress = task.findtext("progress")
-        last_report = task.find("last_report/report")
-        report_id = last_report.get("id") if last_report is not None else None
-        return {
-            "task_id": task_id,
-            "status": status,
-            "progress": progress,
-            "report_id": report_id,
-        }
+    # CAMBIO: antes, si GVM rechazaba la consulta (por ejemplo un task_id
+    # inexistente o mal formado) se lanzaba un GvmResponseError que no
+    # capturaba nadie y la API respondía 500. Ahora cualquier GvmError se
+    # convierte en GvmClientError, que main.py traduce a 404 con un mensaje
+    # claro. Esto es importante para el ciclo de polling de n8n.
+    try:
+        with _open_session() as gmp:
+            response = gmp.get_task(task_id)
+            task = response.find("task")
+            if task is None:
+                raise GvmClientError(f"Task {task_id} no encontrada")
+            status = task.findtext("status")
+            progress = task.findtext("progress")
+            last_report = task.find("last_report/report")
+            report_id = last_report.get("id") if last_report is not None else None
+            return {
+                "task_id": task_id,
+                "status": status,
+                "progress": progress,
+                "report_id": report_id,
+            }
+    except GvmError as exc:
+        raise GvmClientError(
+            f"Error de GVM al consultar la task {task_id}: {exc}"
+        ) from exc
 
+
+def _extraer_cves(nvt) -> list[str]:
+    """CVE asociados a un resultado, tomados de las referencias del NVT."""
+    if nvt is None:
+        return []
+    cves = {
+        ref.get("id").strip()
+        for ref in nvt.findall("refs/ref")
+        if (ref.get("type") or "").lower() == "cve" and ref.get("id")
+    }
+    # Compatibilidad con versiones que traen <cve> como texto ("CVE-A, CVE-B" o "NOCVE")
+    legacy = nvt.findtext("cve")
+    if legacy and legacy.strip().upper() != "NOCVE":
+        cves.update(
+            c.strip() for c in legacy.split(",")
+            if c.strip().upper().startswith("CVE-")
+        )
+    return sorted(cves)
 
 def get_task_results(task_id: str) -> dict:
-    """
-    Devuelve los resultados ya parseados a JSON simple, con foco en lo que
-    Postgres necesita: CVSS real por hallazgo (no estado de puerto de Nmap).
-    """
+    """Resultados del último reporte de la task (solo de ese escaneo)."""
     with _open_session() as gmp:
-        response = gmp.get_results(task_id=task_id, filter_string="rows=1000")
+        task = gmp.get_task(task_id).find("task")
+        if task is None:
+            raise GvmClientError(f"Task {task_id} no encontrada")
+        last_report = task.find("last_report/report")
+        if last_report is None:
+            raise GvmClientError(f"La task {task_id} todavía no tiene reporte")
+        report_id = last_report.get("id")
+
+        response = gmp.get_report(
+            report_id,
+            filter_string="min_qod=0",
+            ignore_pagination=True,
+            details=True,
+        )
         vulnerabilities = []
-        for result in response.xpath("result"):
+        for result in response.xpath("report/report/results/result"):
             nvt = result.find("nvt")
+            cves = _extraer_cves(nvt)
             vulnerabilities.append({
                 "id": result.get("id"),
                 "name": result.findtext("name"),
@@ -216,13 +295,16 @@ def get_task_results(task_id: str) -> dict:
                 "port": result.findtext("port"),
                 "threat": result.findtext("threat"),
                 "severity_cvss": result.findtext("severity"),
-                "cve": nvt.findtext("cve") if nvt is not None else None,
+                "cves": cves,
+                "cve": ", ".join(cves) or None,
                 "description": result.findtext("description"),
             })
-        return {"task_id": task_id, "count": len(vulnerabilities), "results": vulnerabilities}
+        return {"task_id": task_id, "report_id": report_id,
+                "count": len(vulnerabilities), "results": vulnerabilities}
 
+    
 
 def delete_task(task_id: str) -> dict:
     with _open_session() as gmp:
         gmp.delete_task(task_id, ultimate=True)
-        return {"task_id": task_id, "deleted": True}
+        return {"task_id": task_id, "deleted": True} 

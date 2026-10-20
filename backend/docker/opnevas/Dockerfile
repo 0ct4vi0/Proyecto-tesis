@@ -8,6 +8,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY docker/opnevas/main.py .
 COPY docker/opnevas/gvm_client.py .
 
-EXPOSE 8000
+EXPOSE 8002
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8002"]

@@ -8,10 +8,17 @@ services:
     cap_add:
       - NET_ADMIN
       - NET_RAW
-    ports:
-      - "8000:8000"
-
-networks:
-  default:
-    name: vulnman-net
-    external: true
+    # CAMBIO: se agrega network_mode: host para que el contenedor use
+    # la interfaz de red real de Windows/Docker Desktop y así Nmap
+    # pueda alcanzar la LAN física (routers, PCs, etc.), no solo la
+    # red interna de Docker.
+    network_mode: host
+    # CAMBIO: se elimina "ports" — con network_mode: host el mapeo de
+    # puertos no aplica (el contenedor ya usa directamente los puertos
+    # del host, por eso 8000 se sigue viendo en localhost:8000 igual).
+    # ports:
+    #   - "8000:8000"
+    # CAMBIO: se elimina el bloque "networks" (vulnman-net) que estaba
+    # al final del archivo — con network_mode: host, Docker ignora por
+    # completo cualquier configuración de "networks" para este
+    # servicio, así que declararla acá no tenía ningún efecto real.

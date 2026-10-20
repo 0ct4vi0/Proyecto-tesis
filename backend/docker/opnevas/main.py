@@ -1,18 +1,9 @@
 """
-main.py — openvas-api
+main.py
 
-Wrapper REST sobre OpenVAS/Greenbone (GMP), pensado para ser llamado desde
-n8n con el nodo HTTP Request, siguiendo el mismo patrón que nmap-api.
-
-Endpoints:
-  GET  /health                -> chequea conexión/autenticación contra gvmd
-  GET  /scan-configs          -> lista scan configs disponibles (para elegir sin hardcodear)
-  GET  /scanners              -> lista scanners disponibles
-  GET  /port-lists            -> lista port lists disponibles
-  POST /scan                  -> crea target+task y arranca el escaneo
-  GET  /scan/{task_id}/status -> estado/progreso del escaneo
-  GET  /scan/{task_id}/results-> resultados parseados (CVSS real, no puertos Nmap)
-  DELETE /scan/{task_id}      -> limpieza de la task en GVM
+Wrapper REST (FastAPI) para OpenVAS/Greenbone, consumido por n8n vía
+HTTP Request. Traduce llamadas HTTP simples a comandos GMP usando
+gvm_client.py, que encapsula toda la comunicación con python-gvm.
 """
 
 from typing import Optional
@@ -20,8 +11,8 @@ from typing import Optional
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
-from . import gvm_client
-from .gvm_client import GvmClientError
+import gvm_client
+from gvm_client import GvmClientError
 
 app = FastAPI(
     title="openvas-api",

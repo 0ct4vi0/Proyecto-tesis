@@ -7,7 +7,9 @@ app = FastAPI(title="Nmap Scan API")
 
 class ScanRequest(BaseModel):
     target: str
-    arguments: str = "-T4 -sV"
+    # CAMBIO: se agregó -sS (SYN scan) a los argumentos por defecto,
+    # tal como se pidió (sudo nmap -sS -sV <ip>), manteniendo -T4
+    arguments: str = "-T4 -sS -sV"
 
 @app.get("/health")
 def health():
@@ -22,24 +24,31 @@ def scan(req: ScanRequest):
         raise HTTPException(status_code=504, detail="Scan timed out")
     if result.returncode != 0:
         raise HTTPException(status_code=500, detail=result.stderr)
-    return parse_nmap_xml(result.stdout)
+    # CORRECCIÓN: se pasa req.target como parámetro explícito, ya que
+    # "req" no existe dentro del scope de parse_nmap_xml (esa variable
+    # solo vive dentro de scan()) — esto causaba un NameError
+    return parse_nmap_xml(result.stdout, req.target)
 
-def parse_nmap_xml(xml_data: str):
+def parse_nmap_xml(xml_data: str, target: str):
     root = ET.fromstring(xml_data)
-    hosts = []
+
+    # CAMBIO: en vez de devolver {"hosts": [...]} con "ports" anidados
+    # por host (útil para escanear varias IPs a la vez), acá se aplana
+    # todo a un único array "puertos" en español, porque el sub-workflow
+    # de n8n escanea una sola IP por vez y espera justamente ese formato:
+    # {"puertos": [{"puerto", "protocolo", "servicio", "estado"}, ...]}
+    puertos = []
     for host in root.findall("host"):
-        addr_el = host.find("address")
-        ports = []
         ports_el = host.find("ports")
         if ports_el is not None:
             for port in ports_el.findall("port"):
                 state = port.find("state")
                 service = port.find("service")
-                ports.append({
-                    "port": port.get("portid"),
-                    "protocol": port.get("protocol"),
-                    "state": state.get("state") if state is not None else None,
-                    "service": service.get("name") if service is not None else None,
+                puertos.append({
+                    "puerto": port.get("portid"),
+                    "protocolo": port.get("protocol"),
+                    "estado": state.get("state") if state is not None else None,
+                    "servicio": service.get("name") if service is not None else None,
                 })
-        hosts.append({"address": addr_el.get("addr") if addr_el is not None else None, "ports": ports})
-    return {"hosts": hosts}
+
+    return {"objetivo": target, "puertos": puertos}
