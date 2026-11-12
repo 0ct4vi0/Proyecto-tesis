@@ -4,3 +4,10 @@ python-gvm>=26.0.0
 pydantic==2.9.2
 sqlmodel
 httpx
+psycopg[binary]>=3.2
+PyJWT>=2.9
+argon2-cffi>=23.1
+google-auth>=2.35
+python-dotenv>=1.0
+email-validator>=2.2
+requests
